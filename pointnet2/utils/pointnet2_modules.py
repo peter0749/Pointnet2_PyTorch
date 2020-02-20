@@ -5,6 +5,7 @@ from __future__ import (
     print_function,
     unicode_literals,
 )
+import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +16,59 @@ from pointnet2.utils import pointnet2_utils
 if False:
     # Workaround for type hints without depending on the `typing` module
     from typing import *
+
+
+class _PointnetSAModuleBaseIndex(nn.Module):
+    def __init__(self):
+        super(_PointnetSAModuleBaseIndex, self).__init__()
+        self.groupers = None
+        self.mlps = None
+
+    def forward(self, xyz, features=None, point_indices=None):
+        # type: (_PointnetSAModuleBase, torch.Tensor, torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]
+        r"""
+        Parameters
+        ----------
+        xyz : torch.Tensor
+            (B, N, 3) tensor of the xyz coordinates of the features
+        features : torch.Tensor
+            (B, C, N) tensor of the descriptors of the the features
+
+        Returns
+        -------
+        new_xyz : torch.Tensor
+            (B, npoint, 3) tensor of the new features' xyz
+        new_features : torch.Tensor
+            (B,  \sum_k(mlps[k][-1]), npoint) tensor of the new_features descriptors
+        """
+
+        new_features_list = []
+
+        xyz_flipped = xyz.transpose(1, 2).contiguous()
+        new_xyz = (
+            pointnet2_utils.gather_operation(
+                xyz_flipped, point_indices #pointnet2_utils.indexed_point_sample(point_indices)
+            )
+            .transpose(1, 2)
+            .contiguous()
+            if point_indices is not None
+            else None
+        )
+
+        for i in range(len(self.groupers)):
+            new_features = self.groupers[i](
+                xyz, new_xyz, features
+            )  # (B, C, npoint, nsample)
+
+            new_features = self.mlps[i](new_features)  # (B, mlp[-1], npoint, nsample)
+            new_features = F.max_pool2d(
+                new_features, kernel_size=[1, new_features.size(3)]
+            )  # (B, mlp[-1], npoint, 1)
+            new_features = new_features.squeeze(-1)  # (B, mlp[-1], npoint)
+
+            new_features_list.append(new_features)
+
+        return new_xyz, torch.cat(new_features_list, dim=1)
 
 
 class _PointnetSAModuleBase(nn.Module):
@@ -111,6 +165,43 @@ class PointnetSAModuleMSG(_PointnetSAModuleBase):
 
             self.mlps.append(pt_utils.SharedMLP(mlp_spec, bn=bn))
 
+class PointnetSAModuleMSGIndex(_PointnetSAModuleBaseIndex):
+    r"""Pointnet set abstrction layer with multiscale grouping
+
+    Parameters
+    ----------
+    radii : list of float32
+        list of radii to group with
+    nsamples : list of int32
+        Number of samples in each ball query
+    mlps : list of list of int32
+        Spec of the pointnet before the global max_pool for each scale
+    bn : bool
+        Use batchnorm
+    """
+
+    def __init__(self, radii, nsamples, mlps, bn=True, use_xyz=True, group_all=False):
+        # type: (PointnetSAModuleMSG, int, List[float], List[int], List[List[int]], bool, bool) -> None
+        super(PointnetSAModuleMSGIndex, self).__init__()
+
+        assert len(radii) == len(nsamples) == len(mlps)
+
+        self.groupers = nn.ModuleList()
+        self.mlps = nn.ModuleList()
+        for i in range(len(radii)):
+            radius = radii[i]
+            nsample = nsamples[i]
+            self.groupers.append(
+                pointnet2_utils.QueryAndGroup(radius, nsample, use_xyz=use_xyz)
+                if not group_all
+                else pointnet2_utils.GroupAll(use_xyz)
+            )
+            mlp_spec = mlps[i]
+            if use_xyz:
+                mlp_spec[0] += 3
+
+            self.mlps.append(pt_utils.SharedMLP(mlp_spec, bn=bn))
+
 
 class PointnetSAModule(PointnetSAModuleMSG):
     r"""Pointnet set abstrction layer
@@ -140,6 +231,35 @@ class PointnetSAModule(PointnetSAModuleMSG):
             nsamples=[nsample],
             bn=bn,
             use_xyz=use_xyz,
+        )
+
+
+class PointnetSAModuleIndex(PointnetSAModuleMSGIndex):
+    r"""Pointnet set abstrction layer
+
+    Parameters
+    ----------
+    radius : float
+        Radius of ball
+    nsample : int
+        Number of samples in the ball query
+    mlp : list
+        Spec of the pointnet before the global max_pool
+    bn : bool
+        Use batchnorm
+    """
+
+    def __init__(
+        self, mlp, radius=None, nsample=None, bn=True, use_xyz=True, group_all=False
+    ):
+        # type: (PointnetSAModule, List[int], int, float, int, bool, bool) -> None
+        super(PointnetSAModuleIndex, self).__init__(
+            mlps=[mlp],
+            radii=[radius],
+            nsamples=[nsample],
+            bn=bn,
+            use_xyz=use_xyz,
+            group_all=group_all
         )
 
 
@@ -207,6 +327,7 @@ class PointnetFPModule(nn.Module):
 
 
 if __name__ == "__main__":
+    import numpy as np
     from torch.autograd import Variable
 
     torch.manual_seed(1)
@@ -232,3 +353,16 @@ if __name__ == "__main__":
         new_features.backward(torch.cuda.FloatTensor(*new_features.size()).fill_(1))
         print(new_features)
         print(xyz.grad)
+
+    indices = torch.IntTensor(np.stack([np.random.choice(9, 2, replace=False) for _ in range(2)])).cuda()
+    test_module2 = PointnetSAModuleMSGIndex(
+        radii=[5.0, 10.0], nsamples=[6, 3], mlps=[[9, 3], [9, 6]]
+    )
+    test_module2.cuda()
+
+    for _ in range(1):
+        _, new_features = test_module2(xyz, xyz_feats, point_indices=indices)
+        new_features.backward(torch.cuda.FloatTensor(*new_features.size()).fill_(1))
+        print(new_features)
+        print(xyz.grad)
+

@@ -69,7 +69,35 @@ class FurthestPointSampling(Function):
         return None, None
 
 
+class IndexedPointSampling(Function):
+    @staticmethod
+    def forward(ctx, xyz, indices):
+        # type: (Any, torch.Tensor, int) -> torch.Tensor
+        r"""
+        Uses iterative furthest point sampling to select a set of npoint features that have the largest
+        minimum distance
+
+        Parameters
+        ----------
+        xyz : torch.Tensor
+            (B, N, 3) tensor where N > npoint
+        npoint : int32
+            number of features in the sampled set
+
+        Returns
+        -------
+        torch.Tensor
+            (B, npoint) tensor containing the set
+        """
+        return indicies
+
+    @staticmethod
+    def backward(xyz, a=None):
+        return None, None
+
+
 furthest_point_sample = FurthestPointSampling.apply
+indexed_point_sample = IndexedPointSampling.apply
 
 
 class GatherOperation(Function):

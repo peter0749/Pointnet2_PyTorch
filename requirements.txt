@@ -1,4 +1,4 @@
-git+git://github.com/erikwijmans/etw_pytorch_utils.git@v1.1.1#egg=etw_pytorch_utils
+git+git://github.com/peter0749/etw_pytorch_utils.git#egg=etw_pytorch_utils
 h5py
 numpy
 pprint
